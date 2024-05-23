@@ -182,6 +182,7 @@ class Miner {
  * Classe MessageHandler, gère le traitement des messages reçus du serveur.
  */
 class MessageHandler {
+    // Map pour associer à chaque type de message une implémentation spécifique de l'interface Command
     private final Map<String, Command> commands = new HashMap<>();
     private final Miner miner;
     private static final Logger logger = Logger.getLogger(MessageHandler.class.getName());
@@ -194,6 +195,7 @@ class MessageHandler {
     public MessageHandler(Miner miner) {
         this.miner = miner;
         // Enregistrement des commandes possibles
+        // Utilisation d'expressions lambda pour définir le comportement de la méthode execute
         commands.put("WHO_ARE_YOU_?", (message, out) -> out.println(new Scanner(System.in).nextLine()));
         commands.put("GIMME_PASSWORD", (message, out) -> out.println(new Scanner(System.in).nextLine()));
         commands.put("HELLO_YOU", (message, out) -> out.println(new Scanner(System.in).nextLine()));

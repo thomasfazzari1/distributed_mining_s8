@@ -5,114 +5,76 @@ import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Scanner;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Classe représentant le serveur du programme.
+ * Interface pour l'authentification des workers.
  */
-public class Server {
-    // Booléen pour contrôler l'exécution du serveur
-    private volatile boolean keepGoing = true;
-    // Port utilisé par le serveur
-    private final int port = 1337;
-    // WebService utilisé par le serveur pour communiquer avec l'API Raizo
-    private WebService webService;
-    // Liste des workers connectés
-    private static ArrayList<Socket> workers;
-    // Mot de passe du serveur permettant l'authentification des travailleurs
-    private String password;
-    // Difficulté du minage
-    private int difficulty;
-    // Logger
-    private static final Logger logger = Logger.getLogger(Server.class.getName());
-
-    /**
-     * Méthode permettant l'exécution du serveur.
-     *
-     * @param args Arguments de la ligne de commande (non utilisés ici).
-     */
-    public static void main(String[] args) {
-        Server server = new Server();
-        try {
-            server.run();
-            server.runArgs();
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    /**
-     * Constructeur de la classe Server. Initialise les attributs du serveur.
-     */
-    public Server() {
-        // Récupèration de la clé d'API et du mot de passe du serveur depuis les variables d'environnement
-        String apiKey = System.getenv("API_KEY");
-        this.password = System.getenv("PASSWORD");
-        webService = new WebService(apiKey);
-        workers = new ArrayList<>();
-    }
-
-    /**
-     * Démarre le serveur et gére les connexions entrantes.
-     */
-    public void run() {
-        new Thread(() -> {
-            try (ServerSocket server = new ServerSocket(port)) {
-                System.out.printf("Serveur démarré\nPORT : %s\nMOT DE PASSE : %s\n", port, password);
-
-                while (keepGoing) {
-                    try {
-                        Socket serverAccept = server.accept();
-                        handleNewWorker(serverAccept);
-                    } catch (IOException e) {
-                        logger.log(Level.SEVERE, "Erreur lors de l'acceptation du worker : {0}", e.getMessage());
-                    }
-                }
-            } catch (IOException e) {
-                logger.log(Level.SEVERE, "Erreur lors de la création du serveur : {0}", e.getMessage());
-            }
-        }).start();
-    }
-
-    /**
-     * Traite un nouveau worker connecté.
-     *
-     * @param workerSocket Socket du nouveau worker.
-     */
-    private void handleNewWorker(Socket workerSocket) {
-        new Thread(() -> {
-            try (BufferedReader in = new BufferedReader(new InputStreamReader(workerSocket.getInputStream()));
-                 PrintWriter out = new PrintWriter(workerSocket.getOutputStream(), true)) {
-
-                if (authenticateWorker(in, out)) {
-                    synchronized (workers) {
-                        workers.add(workerSocket);
-                    }
-                    handleWorker(workerSocket, in);
-                } else {
-                    System.out.println("Worker " + workerSocket.getRemoteSocketAddress() + " a échoué l'authentification");
-                    System.out.print("$ ");
-                    workerSocket.close();
-                }
-            } catch (Exception e) {
-                logger.log(Level.SEVERE, "Erreur lors du traitement du worker : {0}", e.getMessage());
-            }
-        }).start();
-    }
-
+interface Authenticator {
     /**
      * Authentifie un worker.
      *
-     * @param in  BufferedReader pour recevoir les données du worker.
+     * @param in  BufferedReader pour lire les données du worker.
      * @param out PrintWriter pour envoyer des données au worker.
-     * @return true si l'authentification réussit, sinon false.
-     * @throws IOException En cas d'erreur de lecture/écriture.
+     * @return true si l'authentification est réussie, sinon false.
+     * @throws IOException En cas d'erreur d'entrée/sortie.
      */
-    private boolean authenticateWorker(BufferedReader in, PrintWriter out) throws IOException {
-        System.out.println("\nAuthentification du worker " + in + " en cours");
-        System.out.print("$ ");
+    boolean authenticate(BufferedReader in, PrintWriter out) throws IOException;
+}
+
+/**
+ * Interface pour la gestion des workers.
+ */
+interface WorkerHandler {
+    /**
+     * Gère un nouveau worker.
+     *
+     * @param workerSocket Le socket du worker à gérer.
+     */
+    void handleWorker(Socket workerSocket);
+}
+
+/**
+ * Interface pour la gestion des commandes.
+ */
+interface CommandProcessor {
+    /**
+     * Traite une commande.
+     *
+     * @param command La commande à traiter.
+     * @return true si la commande a été traitée avec succès, sinon false.
+     */
+    boolean processCommand(String command);
+}
+
+/**
+ * Implémentation de l'authentification des workers.
+ */
+class WorkerAuthenticator implements Authenticator {
+    private final String password;
+
+    /**
+     * Constructeur de l'authentificateur du worker.
+     *
+     * @param password Le mot de passe envoyé par le worker.
+     */
+    public WorkerAuthenticator(String password) {
+        this.password = password;
+    }
+
+    /**
+     * Authentifie un worker à partir du mot de passe qu'il fournit.
+     *
+     * @param in  BufferedReader pour lire les données du worker.
+     * @param out PrintWriter pour envoyer des données au worker.
+     * @return true si l'authentification est réussie, sinon false.
+     * @throws IOException En cas d'erreur d'entrée/sortie.
+     */
+    @Override
+    public boolean authenticate(BufferedReader in, PrintWriter out) throws IOException {
         out.println("WHO_ARE_YOU_?");
         String response = in.readLine();
         if ("ITS_ME".equals(response)) {
@@ -129,109 +91,346 @@ public class Server {
         }
         return false;
     }
+}
+
+/**
+ * Implémentation de la gestion des workers côté serveur.
+ */
+class ServerWorkerHandler implements WorkerHandler {
+    private final List<Socket> workers;
+    private final Authenticator authenticator;
+    private final WebService webService;
+    private int difficulty;
+    private static final Logger logger = Logger.getLogger(ServerWorkerHandler.class.getName());
 
     /**
-     * Traite les données d'un worker connecté.
+     * Constructeur du gestionnaire de workers.
      *
-     * @param client Socket du worker connecté.
-     * @param in     BufferedReader pour recevoir les données du worker.
+     * @param workers       La liste des workers connectés.
+     * @param authenticator L'authentificateur utilisé pour l'authentification des workers.
+     * @param webService    Le WebService utilisé pour communiquer avec la webapp.
      */
-    private void handleWorker(Socket client, BufferedReader in) {
+    public ServerWorkerHandler(List<Socket> workers, Authenticator authenticator, WebService webService) {
+        this.workers = workers;
+        this.authenticator = authenticator;
+        this.webService = webService;
+    }
+
+    /**
+     * Gère un nouveau worker.
+     *
+     * @param workerSocket Le socket du worker à gérer.
+     */
+    @Override
+    public void handleWorker(Socket workerSocket) {
+        new Thread(() -> {
+            try (BufferedReader in = new BufferedReader(new InputStreamReader(workerSocket.getInputStream()));
+                 PrintWriter out = new PrintWriter(workerSocket.getOutputStream(), true)) {
+
+                if (authenticator.authenticate(in, out)) {
+                    synchronized (workers) {
+                        workers.add(workerSocket);
+                    }
+                    handleWorkerCommunication(workerSocket, in);
+                } else {
+                    logger.info("Worker " + workerSocket.getRemoteSocketAddress() + " a échoué l'authentification");
+                    workerSocket.close();
+                }
+            } catch (Exception e) {
+                logger.log(Level.SEVERE, "Erreur lors du traitement du worker : {0}", e.getMessage());
+            }
+        }).start();
+    }
+
+    /**
+     * Gère la communication avec un worker.
+     *
+     * @param workerSocket Le socket du worker.
+     * @param in           BufferedReader pour lire les données du worker.
+     * @throws IOException En cas d'erreur d'entrée/sortie.
+     */
+    private void handleWorkerCommunication(Socket workerSocket, BufferedReader in) throws IOException {
         boolean connected = true;
-
         try {
-            System.out.println("\nWorker " + client.getRemoteSocketAddress() + " connecté avec succès");
-            System.out.print("$ ");
-
+            logger.info("Worker " + workerSocket.getRemoteSocketAddress() + " connecté avec succès");
+            // Boucle de communication avec le worker
             while (connected) {
                 String response;
                 try {
                     response = in.readLine();
                 } catch (IOException e) {
                     connected = false;
-                    handleWorkerDisconnection(client, "La connexion a été interrompue");
+                    handleWorkerDisconnection(workerSocket, "La connexion a été interrompue");
                     break;
                 }
                 if (response != null) {
                     handleWorkerResponse(response);
                 } else {
                     connected = false;
-                    handleWorkerDisconnection(client, "Le worker a fermé la connexion");
+                    handleWorkerDisconnection(workerSocket, "Le worker a fermé la connexion");
                 }
             }
-        } catch (IOException e) {
-            e.printStackTrace();
         } finally {
-            cleanWorker(client);
+            cleanWorker(workerSocket);
         }
     }
 
     /**
-     * Traite la réponse d'un worker.
+     * Gère la réponse d'un worker.
      *
-     * @param response Réponse du worker.
-     * @throws IOException En cas d'erreur de traitement.
+     * @param response La réponse du worker.
+     * @throws IOException En cas d'erreur d'entrée/sortie.
      */
     private void handleWorkerResponse(String response) throws IOException {
         if (response.startsWith("FOUND")) {
             processFoundResponse(response);
         } else if (response.startsWith("TESTING")) {
-            System.out.println("$ " + response);
+            logger.info(response);
         } else if (response.equalsIgnoreCase("NOPE")) {
-            System.out.println(response);
+            logger.info(response);
         }
     }
 
     /**
-     * Traite la réponse "FOUND" d'un worker.
+     * Traite la réponse du worker lorsqu'il trouve une solution.
      *
-     * @param response Réponse de type "FOUND".
-     * @throws IOException En cas d'erreur de traitement.
+     * @param response La réponse du worker.
+     * @throws IOException En cas d'erreur d'entrée/sortie.
      */
     private void processFoundResponse(String response) throws IOException {
+        // Extraction des informations de la réponse
         String[] splittedResponse = response.split(" ");
         String nonce = splittedResponse[2];
         String hash = splittedResponse[1];
         String body = String.format("{\"d\":%d,\"n\":\"%s\",\"h\":\"%s\"}", difficulty, nonce, hash);
+        // Validation de la solution auprès du WebService
+        boolean validateResponse = webService.validateWork(body);
+        logger.info("Résultat de la vérification : " + validateResponse);
 
-        try {
-            boolean validateResponse = webService.validateWork(body);
-            System.out.println("Résultat de la vérification : " + validateResponse);
+        if (validateResponse) {
+            endMining();
+        }
+    }
 
-        } catch (IOException e) {
-            logger.log(Level.SEVERE, "Erreur lors de la validation du travail : " + e.getMessage());
+    /**
+     * Envoie la commande "CANCELLED" à tous les workers connectés.
+     * Permet d'ordonner l'arrêt le minage.
+     */
+    private void endMining() {
+        for (Socket worker : workers) {
+            try {
+                PrintWriter out = new PrintWriter(worker.getOutputStream(), true);
+                out.println("CANCELLED");
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
         }
     }
 
     /**
      * Gère la déconnexion d'un worker.
      *
-     * @param client  Socket du worker déconnecté.
-     * @param message Message de déconnexion.
+     * @param workerSocket Le socket du worker.
+     * @param message      Le message de déconnexion.
      */
-    private void handleWorkerDisconnection(Socket client, String message) {
-        System.out.println(message);
-        removeWorker(client);
+    private void handleWorkerDisconnection(Socket workerSocket, String message) {
+        logger.info(message);
+        removeWorker(workerSocket);
     }
 
     /**
      * Nettoie les ressources d'un worker.
      *
-     * @param client Socket du worker.
+     * @param workerSocket Le socket du worker.
      */
-    private void cleanWorker(Socket client) {
+    private void cleanWorker(Socket workerSocket) {
         try {
-            client.close();
-            removeWorker(client);
+            workerSocket.close();
+            removeWorker(workerSocket);
         } catch (IOException e) {
+            logger.log(Level.SEVERE, "Erreur lors du nettoyage du worker : {0}", e.getMessage());
+        }
+    }
+
+    /**
+     * Retire un worker de la liste des workers connectés.
+     *
+     * @param workerSocket Le socket du worker.
+     */
+    private void removeWorker(Socket workerSocket) {
+        synchronized (workers) {
+            workers.remove(workerSocket);
+        }
+        logger.info("Worker " + workerSocket.getRemoteSocketAddress() + " supprimé");
+    }
+
+    /**
+     * Définit la difficulté pour le minage.
+     *
+     * @param difficulty La difficulté du minage.
+     */
+    public void setDifficulty(int difficulty) {
+        this.difficulty = difficulty;
+    }
+}
+
+
+/**
+ * Implémentation du gestionnaire de commandes.
+ */
+class ServerCommandProcessor implements CommandProcessor {
+    private final Server server;
+    private final WorkerHandler workerHandler;
+
+    /**
+     * Constructeur du processeur de commandes côté serveur.
+     *
+     * @param server        L'instance du serveur.
+     * @param workerHandler Le gestionnaire de workers.
+     */
+    public ServerCommandProcessor(Server server, WorkerHandler workerHandler) {
+        this.server = server;
+        this.workerHandler = workerHandler;
+    }
+
+    /**
+     * Traite une commande utilisateur.
+     *
+     * @param command La commande à traiter.
+     * @return true si la commande a été traitée avec succès, sinon false.
+     */
+    @Override
+    public boolean processCommand(String command) {
+        switch (command.toLowerCase()) {
+            case "quit":
+                return server.handleQuitCommand();
+            case "cancel":
+                server.handleCancel();
+                break;
+            case "status":
+                server.handleStatus();
+                break;
+            case "progress":
+                server.handleProgressCommand();
+                break;
+            case "help":
+                server.handleHelp();
+                break;
+            default:
+                if (command.toLowerCase().startsWith("solve")) {
+                    handleSolveCommand(command);
+                } else {
+                    System.out.println("Commande non reconnue : " + command);
+                }
+                break;
+        }
+        return true;
+    }
+
+    /**
+     * Traite la commande de résolution du minage avec une difficulté spécifiée.
+     *
+     * @param command La commande à traiter.
+     */
+    private void handleSolveCommand(String command) {
+        String[] parts = command.split(" ");
+        if (parts.length == 2) {
+            try {
+                int difficulty = Integer.parseInt(parts[1]);
+                ((ServerWorkerHandler) workerHandler).setDifficulty(difficulty);
+                // Génération du travail à effectuer à partir de la webapp
+                String data = server.getWebService().generateWork(difficulty);
+
+                if (data != null) {
+                    // Envoi du nonce aux workers
+                    server.sendNonceToWorkers();
+                    // Envoi du payload aux workers
+                    server.sendDataToWorkers("PAYLOAD " + data);
+                    // Envoi de la commande de résolution aux workers
+                    server.sendDataToWorkers("SOLVE " + difficulty);
+                }
+            } catch (NumberFormatException | IOException e) {
+                Logger.getLogger(ServerCommandProcessor.class.getName()).log(Level.SEVERE, "Cette difficulté n'existe pas ou erreur lors de la génération du travail : {0}", e.getMessage());
+            }
+        }
+    }
+}
+
+/**
+ * Classe principale du serveur.
+ */
+public class Server {
+    // Booléen pour contrôler l'exécution du serveur
+    private volatile boolean keepGoing = true;
+    // Port utilisé par le serveur
+    private final int port = 1337;
+    // WebService utilisé par le serveur pour communiquer avec l'API Raizo
+    private WebService webService;
+    // Liste des workers connectés
+    private static ArrayList<Socket> workers;
+    // Authentificateur utilisé pour l'authentification des workers
+    private final Authenticator authenticator;
+    // Gestionnaire de workers
+    private final WorkerHandler workerHandler;
+    // Gestionnaire de commandes
+    private final CommandProcessor commandProcessor;
+    // Logger
+    private final Logger logger = Logger.getLogger(Server.class.getName());
+
+    /**
+     * Méthode principale pour lancer le serveur.
+     *
+     * @param args Les arguments de la ligne de commande.
+     */
+    public static void main(String[] args) {
+        Server server = new Server();
+        try {
+            server.run();
+            server.runArgs();
+        } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
     /**
-     * Lit les commandes saisies par l'utilisateur.
+     * Constructeur du serveur.
+     */
+    public Server() {
+        String apiKey = System.getenv("API_KEY");
+        String password = System.getenv("PASSWORD");
+        this.webService = new WebService(apiKey);
+        this.workers = new ArrayList<>();
+        this.authenticator = new WorkerAuthenticator(password);
+        this.workerHandler = new ServerWorkerHandler(workers, authenticator, webService);
+        this.commandProcessor = new ServerCommandProcessor(this, workerHandler);
+    }
+
+    /**
+     * Lance le serveur.
+     */
+    public void run() {
+        new Thread(() -> {
+            try (ServerSocket server = new ServerSocket(port)) {
+                System.out.printf("Serveur démarré\nPORT : %s\nMOT DE PASSE : %s\n", port, System.getenv("PASSWORD"));
+                while (keepGoing) {
+                    try {
+                        Socket serverAccept = server.accept();
+                        workerHandler.handleWorker(serverAccept);
+                    } catch (IOException e) {
+                        logger.log(Level.SEVERE, "Erreur lors de l'acceptation du worker : {0}", e.getMessage());
+                    }
+                }
+            } catch (IOException e) {
+                logger.log(Level.SEVERE, "Erreur lors de la création du serveur : {0}", e.getMessage());
+            }
+        }).start();
+    }
+
+    /**
+     * Lance l'écoute des commandes utilisateur.
      */
     public void runArgs() {
+        // Utilisation d'un Scanner pour eviter l'erreur NullPointerException sur la console
         Scanner scanner = new Scanner(System.in);
         new Thread(() -> {
             while (keepGoing) {
@@ -239,7 +438,7 @@ public class Server {
                 String command = scanner.nextLine();
                 if (command == null || command.isEmpty()) break;
                 try {
-                    keepGoing = processCommand(command.trim());
+                    keepGoing = commandProcessor.processCommand(command.trim());
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
@@ -248,44 +447,12 @@ public class Server {
     }
 
     /**
-     * Traite les commandes saisies par l'utilisateur.
+     * Termine l'exécution du serveur. Ferme toutes les connexions avec les workers
+     * et arrête le programme.
      *
-     * @param cmd Commande.
-     * @return true si le serveur doit poursuivre l'éxécution, false sinon.
+     * @return toujours false
      */
-    private boolean processCommand(String cmd) {
-        switch (cmd.toLowerCase()) {
-            case "quit":
-                return handleQuitCommand();
-            case "cancel":
-                handleCancel();
-                break;
-            case "status":
-                handleStatus();
-                break;
-            case "progress":
-                handleProgressCommand();
-                break;
-            case "help":
-                handleHelp();
-                break;
-            default:
-                if (cmd.toLowerCase().startsWith("solve")) {
-                    handleSolveCommand(cmd);
-                } else {
-                    System.out.println("Commande non reconnue : " + cmd);
-                }
-                break;
-        }
-        return true;
-    }
-
-    /**
-     * Traite la commande "quit" (fermeture du serveur).
-     *
-     * @return false pour indiquer l'arrêt du serveur.
-     */
-    private boolean handleQuitCommand() {
+    public boolean handleQuitCommand() {
         keepGoing = false;
         for (Socket worker : workers) {
             try {
@@ -299,14 +466,15 @@ public class Server {
     }
 
     /**
-     * Envoie la commande "CANCELLED" à tous les workers connectés.
+     * Envoie une la commande "CANCELLED" à tous les workers connectés.
+     * Permet d'ordonner l'arrêt le minage.
      */
-    private void handleCancel() {
+    public void handleCancel() {
         for (Socket worker : workers) {
             try {
                 PrintWriter out = new PrintWriter(worker.getOutputStream(), true);
                 out.println("CANCELLED");
-                System.out.println("CANCELLED envoyé au worker " + worker.getRemoteSocketAddress());
+                logger.info("CANCELLED envoyé au worker " + worker.getRemoteSocketAddress());
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -314,15 +482,17 @@ public class Server {
     }
 
     /**
-     * Traite la commande "status" (affiche les différents workers connectés).
+     * Affiche des informations sur les workers connectés.
      */
-    private void handleStatus() {
+    public void handleStatus() {
         synchronized (workers) {
             if (workers.isEmpty()) {
                 System.out.println("Aucun worker connecté.");
             } else {
+                // Liste des workers
                 System.out.println("Workers connectés :");
                 for (Socket worker : workers) {
+                    // Adresse du worker
                     System.out.println(" - " + worker.getRemoteSocketAddress());
                 }
             }
@@ -330,14 +500,15 @@ public class Server {
     }
 
     /**
-     * Envoie la commande "PROGRESS" à tous les workers connectés.
+     * Envoie la commande "PROGRESS" à tous les workers connectés pour obtenir
+     * des informations sur leur progression.
      */
-    private void handleProgressCommand() {
+    public void handleProgressCommand() {
         for (Socket worker : workers) {
             try {
                 PrintWriter out = new PrintWriter(worker.getOutputStream(), true);
                 out.println("PROGRESS");
-                System.out.println("PROGRESS envoyé au worker " + worker.getRemoteSocketAddress());
+                logger.info("PROGRESS envoyé au worker " + worker.getRemoteSocketAddress());
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -345,9 +516,9 @@ public class Server {
     }
 
     /**
-     * Affiche les commandes disponibles.
+     * Affiche les différentes commandes disponibles pour l'utilisateur.
      */
-    private void handleHelp() {
+    public void handleHelp() {
         System.out.println(" • status - Afficher des informations sur les workers connectés");
         System.out.println(" • solve <d> - Lancer un minage avec une difficulté <d> spécifiée");
         System.out.println(" • cancel - Annuler un minage");
@@ -356,50 +527,18 @@ public class Server {
     }
 
     /**
-     * Traite la commande "solve" et lance un minage avec une difficulté spécifiée.
+     * Renvoie le WebService associé au serveur.
      *
-     * @param cmd Commande solve d complète, comprenant la difficulté d spécifiée.
+     * @return le WebService associé au serveur
      */
-    private void handleSolveCommand(String cmd) {
-        String[] parts = cmd.split(" ");
-        if (parts.length == 2) {
-            try {
-                difficulty = Integer.parseInt(parts[1]);
-                String data = fetchAPIData(difficulty);
-
-                if (data != null) {
-                    sendNonceToWorkers();
-                    sendDataToWorkers("PAYLOAD " + data);
-                    sendDataToWorkers("SOLVE " + difficulty);
-                }
-            } catch (NumberFormatException e) {
-                logger.log(Level.SEVERE, "Cette difficulté n'existe pas");
-            }
-        }
+    public WebService getWebService() {
+        return webService;
     }
 
     /**
-     * Récupère les données renvoyées par le WebService.
-     *
-     * @param difficulty La difficulté de minage spécifiée.
-     * @return Les données récupérées depuis le WebService.
+     * Envoie le nonce aux workers pour démarrer le processus de minage.
      */
-    private String fetchAPIData(int difficulty) {
-        try {
-            String data = webService.generateWork(difficulty);
-            System.out.println("Réponse : " + data);
-            return data;
-        } catch (IOException e) {
-            logger.log(Level.SEVERE, "Une erreur est survenue lors de la récupération des données : " + e.getMessage());
-            return null;
-        }
-    }
-
-    /**
-     * Envoie un nonce à tous les worker connectés.
-     * La méthode calcule également le pas et l'index pour chaque worker.
-     */
-    private void sendNonceToWorkers() {
+    public void sendNonceToWorkers() {
         int step = workers.size();
         for (int i = 0; i < step; i++) {
             sendDataToWorker(workers.get(i), "NONCE " + i + " " + step);
@@ -407,45 +546,29 @@ public class Server {
     }
 
     /**
-     * Envoie la data à tous les workers connectés.
+     * Envoie un message à tous les workers connectés.
      *
-     * @param message La data à envoyer.
+     * @param message le message à envoyer
      */
-    private void sendDataToWorkers(String message) {
+    public void sendDataToWorkers(String message) {
         for (Socket worker : workers) {
             sendDataToWorker(worker, message);
         }
     }
 
     /**
-     * Envoie la data à un worker spécifique.
+     * Envoie un message à un worker spécifique.
      *
-     * @param worker  Le socket du worker.
-     * @param message La data à envoyer.
+     * @param worker  le worker auquel envoyer le message
+     * @param message le message à envoyer
      */
     private void sendDataToWorker(Socket worker, String message) {
         try {
             PrintWriter out = new PrintWriter(worker.getOutputStream(), true);
             out.println(message);
-            System.out.println(message + " envoyé au worker " + worker.getRemoteSocketAddress());
+            logger.info(message + " envoyé au worker " + worker.getRemoteSocketAddress());
         } catch (IOException e) {
-            logger.log(Level.SEVERE, "Une erreur est survenue lors de l'envoi au worker " + worker.getRemoteSocketAddress() + " : " + e.getMessage());
+            logger.log(Level.SEVERE, "Erreur lors de l'envoi au worker {0} : {1}", new Object[]{worker.getRemoteSocketAddress(), e.getMessage()});
         }
-    }
-
-    /**
-     * Gère la déconnexion d'un worker.
-     *
-     * @param client Le socket du worker à déconnecter.
-     */
-    private void removeWorker(Socket client) {
-        workers.remove(client);
-        try {
-            client.close();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        System.out.println("Worker " + client.getRemoteSocketAddress() + " supprimé");
-        System.out.print("$ ");
     }
 }
