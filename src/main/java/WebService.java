@@ -75,7 +75,7 @@ class RaizoHttpService implements HttpService {
 }
 
 /**
- * La classe WebService permet de communiquer avec l'API Raizo afin de
+ * Classe permettant la communication avec l'API Raizo afin de
  * générer une tâche ou de valider le résultat d'un minage.
  */
 public class WebService {
