@@ -55,19 +55,19 @@ Le système comporte trois acteurs principaux :
 
 2. **Accéder au répertoire du projet :**
 
-Naviguez vers le répertoire du projet :
+    Naviguez vers le répertoire du projet :
 
-   ```sh
-   cd distributed_mining_s8
-   ```
+    ```sh
+    cd distributed_mining_s8
+    ```
 
 3. **Compiler le projet :**
 
-Compilez le projet en utilisant Maven :
+    Compilez le projet en utilisant Maven :
 
-   ```sh
-   mvn clean install
-   ```
+    ```sh
+    mvn clean install
+    ```
 
 ## Usage
 
