@@ -88,6 +88,7 @@ class WorkerAuthenticator implements Authenticator {
                     return true;
                 }
             }
+            out.println("YOU_DONT_FOOL_ME");
         }
         return false;
     }
@@ -570,5 +571,9 @@ public class Server {
         } catch (IOException e) {
             logger.log(Level.SEVERE, "Erreur lors de l'envoi au worker {0} : {1}", new Object[]{worker.getRemoteSocketAddress(), e.getMessage()});
         }
+    }
+
+    public boolean isKeepGoing(){
+        return keepGoing;
     }
 }
